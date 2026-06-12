@@ -9,22 +9,23 @@ import plotly.express as px
 import yaml
 
 
-DEFAULT_RECORDINGS_PATH = (
+DEFAULT_SESSION_PATH = (
     Path.home()
     / "anvil-loader"
     / "data"
     / "recordings"
+    / "organize-the-table"
 )
 
-RECORDINGS_PATH = Path(
-    os.getenv("RECORDINGS_PATH", str(DEFAULT_RECORDINGS_PATH))
+SESSION_PATH = Path(
+    os.getenv("RECORDINGS_PATH", str(DEFAULT_SESSION_PATH))
 )
 
 OUTPUT_FILE = (
     Path.home()
     / "Documents"
     / "robotics_reports"
-    / "anvil_recordings_summary.csv"
+    / "anvil_session_summary.csv"
 )
 
 
@@ -67,7 +68,7 @@ def find_duration_seconds(metadata):
     return None
 
 
-def find_created_time(metadata, episode_path):
+def find_created_time(metadata, recording_path):
     possible_keys = [
         "created",
         "created_at",
@@ -84,64 +85,51 @@ def find_created_time(metadata, episode_path):
             except Exception:
                 pass
 
-    return datetime.fromtimestamp(episode_path.stat().st_mtime)
+    return datetime.fromtimestamp(recording_path.stat().st_mtime)
 
 
-def load_recordings(recordings_path):
+def load_session(session_path):
     records = []
 
-    session_dirs = [
-        p for p in recordings_path.iterdir()
-        if p.is_dir()
+    recording_dirs = [
+        p for p in session_path.iterdir()
+        if p.is_dir() and p.name.isdigit()
     ]
 
-    for session_dir in sorted(session_dirs):
-        session_name = session_dir.name
+    for recording_dir in sorted(recording_dirs):
+        recording_name = recording_dir.name
 
-        episode_dirs = [
-            p for p in session_dir.iterdir()
-            if p.is_dir()
-        ]
+        json_metadata = read_json(recording_dir / "metadata.json")
+        yaml_metadata = read_yaml(recording_dir / "metadata.yaml")
 
-        for episode_dir in sorted(episode_dirs):
-            episode_name = episode_dir.name
+        metadata = {}
+        metadata.update(yaml_metadata)
+        metadata.update(json_metadata)
 
-            json_metadata = read_json(episode_dir / "metadata.json")
-            yaml_metadata = read_yaml(episode_dir / "metadata.yaml")
+        mcap_files = sorted(recording_dir.glob("*.mcap"))
 
-            metadata = {}
-            metadata.update(yaml_metadata)
-            metadata.update(json_metadata)
+        duration_seconds = find_duration_seconds(metadata)
 
-            mcap_files = sorted(episode_dir.glob("*.mcap"))
-            mcap_count = len(mcap_files)
+        created_time = find_created_time(metadata, recording_dir)
+        updated_time = datetime.fromtimestamp(recording_dir.stat().st_mtime)
 
-            duration_seconds = find_duration_seconds(metadata)
-
-            if duration_seconds is None:
-                duration_seconds = None
-
-            created_time = find_created_time(metadata, episode_dir)
-            updated_time = datetime.fromtimestamp(episode_dir.stat().st_mtime)
-
-            records.append({
-                "session": session_name,
-                "episode": episode_name,
+        records.append(
+            {
+                "recording": recording_name,
                 "duration_seconds": duration_seconds,
                 "duration": format_duration(duration_seconds),
                 "created_time": created_time,
                 "updated_time": updated_time,
-                "mcap_count": mcap_count,
-                "episode_path": str(episode_dir),
-            })
+                "mcap_count": len(mcap_files),
+            }
+        )
 
     df = pd.DataFrame(records)
 
     if not df.empty:
         df = df.sort_values("created_time").reset_index(drop=True)
 
-        df["previous_session"] = df["session"].shift(1)
-        df["previous_episode"] = df["episode"].shift(1)
+        df["previous_recording"] = df["recording"].shift(1)
         df["previous_updated_time"] = df["updated_time"].shift(1)
 
         df["setup_time_seconds"] = (
@@ -155,27 +143,18 @@ def load_recordings(recordings_path):
 
 
 st.set_page_config(
-    page_title="Anvil Recordings Dashboard",
+    page_title="Anvil Session Dashboard",
     layout="wide",
 )
 
-st.title("Anvil Recordings Dashboard")
+session_name = SESSION_PATH.name
 
-recordings_path_input = st.text_input(
-    "Recordings path",
-    value=str(RECORDINGS_PATH),
-)
+st.title(session_name)
 
-recordings_path = Path(recordings_path_input)
-
-if not recordings_path.exists():
-    st.warning("Recordings path does not exist.")
-    st.stop()
-
-df = load_recordings(recordings_path)
+df = load_session(SESSION_PATH)
 
 if df.empty:
-    st.warning("No recordings found.")
+    st.warning("No recordings found. Make sure RECORDINGS_PATH points to a session folder.")
     st.stop()
 
 
@@ -189,16 +168,11 @@ duration_df = df.dropna(subset=["duration_seconds"])
 setup_df = df.dropna(subset=["setup_time_seconds"])
 
 total_recordings = len(df)
-total_sessions = df["session"].nunique()
 total_recording_time = duration_df["duration_seconds"].sum()
 typical_duration = duration_df["duration_seconds"].median()
 
-if not duration_df.empty:
-    longest = duration_df.loc[duration_df["duration_seconds"].idxmax()]
-    shortest = duration_df.loc[duration_df["duration_seconds"].idxmin()]
-else:
-    longest = None
-    shortest = None
+longest = duration_df.loc[duration_df["duration_seconds"].idxmax()]
+shortest = duration_df.loc[duration_df["duration_seconds"].idxmin()]
 
 avg_setup_time = setup_df["setup_time_seconds"].mean()
 total_setup_time = setup_df["setup_time_seconds"].sum()
@@ -213,14 +187,13 @@ recording_utilization = (
 
 st.subheader("Recording Summary")
 
-col1, col2, col3, col4, col5, col6 = st.columns(6)
+col1, col2, col3, col4, col5 = st.columns(5)
 
-col1.metric("Total Sessions", total_sessions)
-col2.metric("Total Recordings", total_recordings)
-col3.metric("Total Recording Time", format_duration(total_recording_time))
-col4.metric("Typical Duration", format_duration(typical_duration))
-col5.metric("Longest Recording", longest["duration"] if longest is not None else "N/A")
-col6.metric("Shortest Recording", shortest["duration"] if shortest is not None else "N/A")
+col1.metric("Total Recordings", total_recordings)
+col2.metric("Total Recording Time", format_duration(total_recording_time))
+col3.metric("Typical Duration", format_duration(typical_duration))
+col4.metric("Longest Recording", longest["duration"])
+col5.metric("Shortest Recording", shortest["duration"])
 
 st.divider()
 
@@ -237,92 +210,62 @@ col4.metric("Recording Utilization", f"{recording_utilization:.1f}%")
 st.divider()
 
 
-st.subheader("Recordings by Session")
+st.subheader("Recording Duration Trend")
 
-session_summary = (
-    df.groupby("session")
-    .agg(
-        recordings=("episode", "count"),
-        total_recording_seconds=("duration_seconds", "sum"),
-        typical_duration_seconds=("duration_seconds", "median"),
-    )
-    .reset_index()
+plot_df = df.copy()
+plot_df["recording_index"] = range(1, len(plot_df) + 1)
+
+median_duration = plot_df["duration_seconds"].median()
+
+fig = px.scatter(
+    plot_df,
+    x="recording_index",
+    y="duration_seconds",
+    hover_data=["recording", "duration"],
+    title="Recording Duration by Recording",
+    labels={
+        "recording_index": "Recording",
+        "duration_seconds": "Duration (seconds)",
+    },
 )
 
-session_summary["total_recording_time"] = session_summary[
-    "total_recording_seconds"
-].apply(format_duration)
+fig.update_traces(mode="markers+lines")
 
-session_summary["typical_duration"] = session_summary[
-    "typical_duration_seconds"
-].apply(format_duration)
-
-st.dataframe(
-    session_summary[
-        [
-            "session",
-            "recordings",
-            "total_recording_time",
-            "typical_duration",
-        ]
-    ],
-    use_container_width=True,
+fig.add_hline(
+    y=median_duration,
+    line_dash="dash",
+    annotation_text=f"Median: {format_duration(median_duration)}",
+    annotation_position="top left",
 )
 
-fig_sessions = px.bar(
-    session_summary,
-    x="session",
-    y="recordings",
-    title="Recordings per Session",
-)
-
-st.plotly_chart(fig_sessions, use_container_width=True)
-
-
-if not duration_df.empty:
-    st.subheader("Recording Duration Distribution")
-
-    fig_duration = px.histogram(
-        duration_df,
-        x="duration_seconds",
-        nbins=20,
-        title="Distribution of Recording Duration",
-    )
-
-    st.plotly_chart(fig_duration, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True)
 
 
 st.subheader("Longest Recordings")
 
-if duration_df.empty:
-    st.info("No duration data available.")
-else:
-    st.dataframe(
-        duration_df.sort_values("duration_seconds", ascending=False)
-        [["session", "episode", "duration"]]
-        .head(10),
-        use_container_width=True,
-    )
+st.dataframe(
+    duration_df.sort_values("duration_seconds", ascending=False)
+    [["recording", "duration"]]
+    .head(10),
+    use_container_width=True,
+)
 
 
 st.subheader("Shortest Recordings")
 
-if duration_df.empty:
-    st.info("No duration data available.")
-else:
-    st.dataframe(
-        duration_df.sort_values("duration_seconds", ascending=True)
-        [["session", "episode", "duration"]]
-        .head(10),
-        use_container_width=True,
-    )
+st.dataframe(
+    duration_df.sort_values("duration_seconds", ascending=True)
+    [["recording", "duration"]]
+    .head(10),
+    use_container_width=True,
+)
 
 
 st.subheader("Longest Setup Times")
 
 st.dataframe(
     setup_df.sort_values("setup_time_seconds", ascending=False)
-    [["previous_session", "previous_episode", "session", "episode", "setup_time"]]
+    [["previous_recording", "recording", "setup_time"]]
     .head(10),
     use_container_width=True,
 )
@@ -332,7 +275,7 @@ st.subheader("Shortest Setup Times")
 
 st.dataframe(
     setup_df.sort_values("setup_time_seconds", ascending=True)
-    [["previous_session", "previous_episode", "session", "episode", "setup_time"]]
+    [["previous_recording", "recording", "setup_time"]]
     .head(10),
     use_container_width=True,
 )
@@ -343,8 +286,7 @@ st.subheader("All Recordings")
 st.dataframe(
     df[
         [
-            "session",
-            "episode",
+            "recording",
             "duration",
             "setup_time",
             "created_time",
